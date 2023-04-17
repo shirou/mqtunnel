@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const tcpBufSide = 1024
+const bufferSize = 4096
 const tunnelKeepAlivePeriod = time.Second * 180
 
 type TCPConnection struct {
@@ -20,8 +20,10 @@ type TCPConnection struct {
 	// reader *bufio.Reader // bytes from MQTT
 	// writer *bufio.Writer // bytes to MQTT
 
-	conn   net.Conn
-	tunnel Tunnel
+	conn net.Conn
+	//writeConn bufio.Writer
+	writeConn net.Conn
+	tunnel    Tunnel
 }
 
 func NewTCPConnection(conf Config, port int, tun Tunnel) (*TCPConnection, error) {
@@ -38,16 +40,6 @@ func (con *TCPConnection) Start(ctx context.Context) error {
 	zap.S().Debugw("Tunnel type", zap.String("type", string(con.tunnel.tunnelType)))
 	if con.tunnel.tunnelType == TunnelTypeIn {
 		go con.listen(ctx)
-	} else {
-		zap.S().Debugw("start connecting", zap.Int("local_port", con.tunnel.LocalPort))
-		conn, err := con.connect(ctx)
-		if err != nil {
-			zap.S().Error(err)
-			return fmt.Errorf("connect error, %w", err)
-		}
-		con.conn = conn
-		zap.S().Debugw("connected", zap.Int("local_port", con.tunnel.LocalPort))
-		go con.handleReader(ctx, conn)
 	}
 
 	for {
@@ -100,17 +92,27 @@ func (con *TCPConnection) listen(ctx context.Context) error {
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(time.Second * 60)
 		con.conn = conn
+		con.writeConn = conn
 		go con.handleReader(ctx, conn)
 	}
 }
 
 // write writes to conn
-func (con *TCPConnection) write(b []byte) (int, error) {
-	zap.S().Debugw("tcp write", zap.Int("port", con.port))
+func (con *TCPConnection) write(ctx context.Context, b []byte) (int, error) {
+	zap.S().Debugw("tcp write", zap.Int("port", con.port), zap.Int("size", len(b)))
 
 	if con.conn == nil {
-		// before local connection
-		return 0, nil
+		// not connected yet
+		zap.S().Debugw("start connecting", zap.Int("local_port", con.tunnel.LocalPort))
+		conn, err := con.connect(ctx)
+		if err != nil {
+			zap.S().Error(err)
+			return 0, fmt.Errorf("connect error, %w", err)
+		}
+		con.conn = conn
+		con.writeConn = conn
+		zap.S().Debugw("connected", zap.Int("local_port", con.tunnel.LocalPort))
+		go con.handleReader(ctx, conn)
 	}
 
 	return con.conn.Write(b)
@@ -118,8 +120,8 @@ func (con *TCPConnection) write(b []byte) (int, error) {
 
 func (con *TCPConnection) handleReader(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	buf := make([]byte, tcpBufSide)
 	for {
+		buf := make([]byte, bufferSize)
 		n, err := conn.Read(buf)
 		if err != nil {
 			if err != io.EOF {
@@ -127,9 +129,7 @@ func (con *TCPConnection) handleReader(ctx context.Context, conn net.Conn) {
 			}
 			return
 		}
-		_, err = con.tunnel.Publish(buf[:n])
-		if err != nil {
-			zap.S().Error("tunnel write error", zap.Error(err))
-		}
+		zap.S().Debugw("handleReader", zap.Int("size", n))
+		con.tunnel.publishCh <- buf[:n]
 	}
 }

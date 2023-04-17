@@ -64,14 +64,14 @@ func (con *mqttConnection) Start(ctx context.Context) error {
 			zap.S().Error("mqtt disconnect message. try to reconnect")
 			// do nothing. auto-reconnect should work
 		case <-ctx.Done():
-			zap.S().Warnf("done: %v", ctx.Err())
+			zap.S().Warnf("MQTTConnection finished, %v", ctx.Err())
 			return ctx.Err()
 		}
 	}
 }
 
-func (con *mqttConnection) Publish(topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
-	zap.S().Debugw("publish", zap.String("topic", topic))
+func (con *mqttConnection) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+	zap.S().Debugw("mqtt publish", zap.String("topic", topic))
 
 	return con.client.Publish(topic, qos, retained, payload)
 }
@@ -116,7 +116,7 @@ func (con *mqttConnection) subscribe() error {
 }
 
 func (con *mqttConnection) onMessage(client mqtt.Client, msg mqtt.Message) {
-	zap.S().Debugw("on message", zap.String("topic", msg.Topic()))
+	zap.S().Debugw("on message", zap.String("topic", msg.Topic()), zap.Int("size", len(msg.Payload())))
 
 	if msg.Topic() == con.conf.Control {
 		// This is control message. start a new tunnel
@@ -142,7 +142,7 @@ func (con *mqttConnection) onMessage(client mqtt.Client, msg mqtt.Message) {
 			zap.String("topic", msg.Topic()))
 		return
 	}
-	tun.Write(msg.Payload())
+	tun.writeCh <- msg.Payload()
 }
 
 func (con *mqttConnection) onConnect(client mqtt.Client) {

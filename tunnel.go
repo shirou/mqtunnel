@@ -27,6 +27,9 @@ type Tunnel struct {
 	conf           Config
 	tcpConnection  *TCPConnection
 	mqttConnection *mqttConnection
+
+	writeCh   chan []byte // writeCh writes a payload from MQTT Broker to local connection
+	publishCh chan []byte // publishCh publish a payload to MQTT Broker
 }
 
 func NewTunnel(conf Config, local, remote int) Tunnel {
@@ -42,6 +45,8 @@ func NewTunnel(conf Config, local, remote int) Tunnel {
 
 		tunnelType: TunnelTypeIn,
 		conf:       conf,
+		writeCh:    make(chan []byte, bufferSize*10),
+		publishCh:  make(chan []byte, bufferSize*10),
 	}
 }
 
@@ -59,24 +64,34 @@ func (tun *MQTunnel) OpenTunnel(ctx context.Context, tunnel Tunnel) error {
 	if err := tun.mqtt.OpenTunnel(tunnel.RemoteTopic, tunnel); err != nil {
 		return fmt.Errorf("broker open error, %w", err)
 	}
-	// TODO: where should we unsubscribe?
-	// defer tun.mqtt.client.Unsubscribe(tunnel.RemoteTopic)
+
+	go tunnel.Start(ctx)
 
 	return nil
 }
 
-// Write writes a payload from MQTT Broker to local connection
-func (tun *Tunnel) Write(b []byte) (int, error) {
-	zap.S().Debugw("Write", zap.String("topic", tun.RemoteTopic), zap.String("payload", string(b)))
-	return tun.tcpConnection.write(b)
-}
+func (tun *Tunnel) Start(ctx context.Context) {
+	// TODO: where should we unsubscribe?
+	// defer tun.mqttConnection.Unsubscribe(tun.RemoteTopic)
 
-// Publish publish a payload to MQTT Broker
-func (tun *Tunnel) Publish(b []byte) (int, error) {
-	// does not wait publish
-	zap.S().Debugw("Publish", zap.String("topic", tun.LocalTopic), zap.String("payload", string(b)))
-	tun.mqttConnection.Publish(tun.LocalTopic, 0, false, b)
-	return len(b), nil
+	for {
+		select {
+		case b := <-tun.writeCh:
+			zap.S().Debugw("writeCh",
+				zap.String("topic", tun.LocalTopic),
+				zap.Int("size", len(b)))
+			tun.tcpConnection.write(ctx, b)
+		case b := <-tun.publishCh:
+			// does not wait publish
+			zap.S().Debugw("publisSh",
+				zap.String("topic", tun.LocalTopic),
+				zap.Int("size", len(b)))
+			tun.mqttConnection.Publish(ctx, tun.LocalTopic, 0, false, b)
+		case <-ctx.Done():
+			return
+		}
+	}
+
 }
 
 func NewTunnelFromMsg(conf Config, msg mqtt.Message) (Tunnel, error) {
@@ -91,6 +106,8 @@ func NewTunnelFromMsg(conf Config, msg mqtt.Message) (Tunnel, error) {
 	ret.LocalPort, ret.RemotePort = ret.RemotePort, ret.LocalPort
 	ret.LocalTopic, ret.RemoteTopic = ret.RemoteTopic, ret.LocalTopic
 	ret.tunnelType = TunnelTypeOut
+	ret.writeCh = make(chan []byte, bufferSize*10)
+	ret.publishCh = make(chan []byte, bufferSize*10)
 
 	return ret, nil
 }
