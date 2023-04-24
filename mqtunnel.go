@@ -2,7 +2,6 @@ package mqtunnel
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -10,59 +9,67 @@ import (
 
 const tunnelQoS = 0
 
+// MQTunnel is a main component of mqtunnel.
 type MQTunnel struct {
-	conf Config
-	mqtt *mqttConnection
+	conf       Config
+	mqttBroker *mqttBroker
 
-	openRequest chan Tunnel
+	openCh chan *Tunnel // open request comes from MQTTBroker
+	ackCh  chan string  // ack comes from MQTT Broker
 }
 
 func NewMQTunnel(conf Config) (*MQTunnel, error) {
 	ret := MQTunnel{
-		conf:        conf,
-		openRequest: make(chan Tunnel),
+		conf: conf,
+
+		openCh: make(chan *Tunnel),
+		ackCh:  make(chan string),
 	}
 
 	return &ret, nil
 }
 
-func (tun *MQTunnel) Start(ctx context.Context, tunnel Tunnel) error {
-	mqtt, err := newMQTTConnection(tun.conf, tun.openRequest)
+// Start starts MQTT broker connection, and also start waiting TCP connection if
+// this is a local mqtunnel.
+func (mqt *MQTunnel) Start(ctx context.Context, tun *Tunnel) error {
+	mqBroker, err := NewMQTTBroker(mqt.conf, mqt.openCh, mqt.ackCh)
 	if err != nil {
-		return fmt.Errorf("mqtt connection error, %w", err)
+		return fmt.Errorf("MQTT connection error, %w", err)
 	}
-	go mqtt.Start(ctx)
+	go mqBroker.Start(ctx)
 
-	tun.mqtt = mqtt
+	mqt.mqttBroker = mqBroker
+	tun.mqttBroker = mqBroker
 
-	if tunnel.LocalPort != 0 && tunnel.RemotePort != 0 {
-		// this is connection starter side
-		zap.S().Debugw("this is starter(out) side")
-		if err := tun.OpenTunnel(ctx, tunnel); err != nil {
+	if tun.LocalPort != 0 && tun.RemotePort != 0 {
+		zap.S().Debugw("this is local side")
+
+		if err := tun.setupLocalTunnel(ctx); err != nil {
 			return fmt.Errorf("failed to open tunnel, %w", err)
 		}
-
-		// send control packet after subscribed
-		buf, _ := json.Marshal(tunnel)
-		token := tun.mqtt.Publish(ctx, tun.conf.Control, 1, false, buf)
-		token.Wait()
-		if err := token.Error(); err != nil {
-			return fmt.Errorf("publish control msg error, %w", err)
-		}
-
 	} else {
-		// subscribe control topic
-		if err := mqtt.SubscribeControl(tun.conf.Control); err != nil {
+		zap.S().Debugw("this is remote side")
+		// subscribe the control topic
+		if err := mqBroker.SubscribeControl(mqt.conf.Control); err != nil {
 			return fmt.Errorf("failed to control subscribe, %w", err)
 		}
 	}
 
 	for {
 		select {
-		case tunnel := <-tun.openRequest:
-			if err := tun.OpenTunnel(ctx, tunnel); err != nil {
-				zap.S().Errorf("open tunnel error, %w", err)
-			}
+		case tun := <-mqt.openCh:
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			go tun.MainLoop(ctx)
+
+		case <-mqt.ackCh:
+			// receive ack on local side
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			go tun.MainLoop(ctx)
+
 		case <-ctx.Done():
 			return ctx.Err()
 		}

@@ -23,10 +23,11 @@ type TCPConnection struct {
 	conn net.Conn
 	//writeConn bufio.Writer
 	writeConn net.Conn
-	tunnel    Tunnel
+	isLocal   bool
+	tunnel    *Tunnel
 }
 
-func NewTCPConnection(conf Config, port int, tun Tunnel) (*TCPConnection, error) {
+func NewTCPConnection(conf Config, port int, tun *Tunnel) (*TCPConnection, error) {
 	ret := TCPConnection{
 		conf:   conf,
 		port:   port,
@@ -36,11 +37,8 @@ func NewTCPConnection(conf Config, port int, tun Tunnel) (*TCPConnection, error)
 	return &ret, nil
 }
 
-func (con *TCPConnection) Start(ctx context.Context) error {
-	zap.S().Debugw("Tunnel type", zap.String("type", string(con.tunnel.tunnelType)))
-	if con.tunnel.tunnelType == TunnelTypeIn {
-		go con.listen(ctx)
-	}
+func (con *TCPConnection) StartListening(ctx context.Context) error {
+	go con.listen(ctx)
 
 	for {
 		select {
@@ -50,7 +48,58 @@ func (con *TCPConnection) Start(ctx context.Context) error {
 	}
 }
 
-func (con *TCPConnection) connect(ctx context.Context) (net.Conn, error) {
+func (con *TCPConnection) listen(ctx context.Context) error {
+	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", con.port))
+	if err != nil {
+		zap.S().Errorw("ResolveTCPAddr error", zap.Error(err))
+		return fmt.Errorf("ResolveTCPAddr error, %w", err)
+	}
+
+	listener, err := net.ListenTCP("tcp4", addr)
+	if err != nil {
+		zap.S().Errorw("listen error", zap.Error(err))
+		return fmt.Errorf("listen error, %w", err)
+	}
+	defer listener.Close()
+	zap.S().Infow("start listening", zap.Int("port", con.port))
+
+	// create a child context
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for {
+		conn, err := listener.AcceptTCP()
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+				continue
+			} else {
+				return fmt.Errorf("accept error, %w", err)
+			}
+		}
+
+		conn.SetKeepAlive(true)
+		conn.SetKeepAlivePeriod(time.Second * 60)
+		con.conn = conn
+		con.writeConn = conn
+		zap.S().Debugw("accepted", zap.Int("local_port", con.port), zap.String("remote", conn.RemoteAddr().String()))
+
+		// send open request to remote side
+		if err := con.tunnel.OpenRequest(ctx); err != nil {
+			return fmt.Errorf("openRequest failed, %w", err)
+		}
+
+		// Block other connections to prevent line congestion.
+		if err := con.handleRead(ctx, conn); err != nil {
+			return err
+		}
+	}
+}
+
+// Connect connects to TCP port on remote mqtunnel side.
+func (con *TCPConnection) Connect(ctx context.Context) (net.Conn, error) {
+	zap.S().Debugw("start connecting", zap.Int("local_port", con.tunnel.LocalPort))
+
+	// TODO: Does we want to any hosts instead of localhost?
 	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("localhost:%d", con.port))
 	if err != nil {
 		return nil, fmt.Errorf("ResolveTCPAddr error, %w", err)
@@ -62,63 +111,28 @@ func (con *TCPConnection) connect(ctx context.Context) (net.Conn, error) {
 	}
 	conn.SetKeepAlive(true)
 	conn.SetKeepAlivePeriod(tunnelKeepAlivePeriod)
+
+	con.conn = conn
+	con.writeConn = conn
+	zap.S().Debugw("connected", zap.Int("local_port", con.tunnel.LocalPort))
+	go con.handleRead(ctx, conn)
 	return conn, nil
 }
 
-func (con *TCPConnection) listen(ctx context.Context) error {
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%d", con.port))
-	if err != nil {
-		zap.S().Errorw("ResolveTCPAddr error", zap.Error(err))
-		return fmt.Errorf("ResolveTCPAddr error, %w", err)
-	}
-
-	listener, err := net.ListenTCP("tcp", addr)
-	if err != nil {
-		zap.S().Errorw("listen error", zap.Error(err))
-		return fmt.Errorf("listen error, %w", err)
-	}
-	defer listener.Close()
-	zap.S().Infow("start listening", zap.Int("port", con.port))
-
-	for {
-		conn, err := listener.AcceptTCP()
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				continue
-			} else {
-				return fmt.Errorf("accept error, %w", err)
-			}
-		}
-		conn.SetKeepAlive(true)
-		conn.SetKeepAlivePeriod(time.Second * 60)
-		con.conn = conn
-		con.writeConn = conn
-		go con.handleReader(ctx, conn)
-	}
-}
-
-// write writes to conn
-func (con *TCPConnection) write(ctx context.Context, b []byte) (int, error) {
+// handleWrite writes to conn
+func (con *TCPConnection) handleWrite(ctx context.Context, b []byte) (int, error) {
 	zap.S().Debugw("tcp write", zap.Int("port", con.port), zap.Int("size", len(b)))
 
 	if con.conn == nil {
-		// not connected yet
-		zap.S().Debugw("start connecting", zap.Int("local_port", con.tunnel.LocalPort))
-		conn, err := con.connect(ctx)
-		if err != nil {
-			zap.S().Error(err)
-			return 0, fmt.Errorf("connect error, %w", err)
-		}
-		con.conn = conn
-		con.writeConn = conn
-		zap.S().Debugw("connected", zap.Int("local_port", con.tunnel.LocalPort))
-		go con.handleReader(ctx, conn)
+		return 0, fmt.Errorf("write but not connected yet")
 	}
 
 	return con.conn.Write(b)
 }
 
-func (con *TCPConnection) handleReader(ctx context.Context, conn net.Conn) {
+func (con *TCPConnection) handleRead(ctx context.Context, conn net.Conn) error {
+	zap.S().Debugw("handleRead", zap.Int("port", con.port))
+
 	defer conn.Close()
 	for {
 		buf := make([]byte, bufferSize)
@@ -127,7 +141,7 @@ func (con *TCPConnection) handleReader(ctx context.Context, conn net.Conn) {
 			if err != io.EOF {
 				zap.S().Error("tcp read error", zap.Error(err))
 			}
-			return
+			return err
 		}
 		zap.S().Debugw("handleReader", zap.Int("size", n))
 		con.tunnel.publishCh <- buf[:n]

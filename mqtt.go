@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -13,21 +14,28 @@ import (
 	"go.uber.org/zap"
 )
 
-type mqttConnection struct {
+type mqttBroker struct {
 	client             mqtt.Client
 	conf               Config
 	mqtt_disconnect_ch chan bool
 	controlTopic       string
-	tunnelTopics       map[string]Tunnel
-	openTunnel         chan Tunnel
+	controlAckTopic    string
+	tunnelTopics       map[string]*Tunnel
+
+	openCh chan *Tunnel
+	ackCh  chan string
 }
 
-func newMQTTConnection(conf Config, openTunnel chan Tunnel) (*mqttConnection, error) {
-	ret := mqttConnection{
+const subscribeTimeout = 5 * time.Second
+
+func NewMQTTBroker(conf Config, openCh chan *Tunnel, ackCh chan string) (*mqttBroker, error) {
+	ret := mqttBroker{
 		conf:               conf,
 		mqtt_disconnect_ch: make(chan bool),
-		tunnelTopics:       make(map[string]Tunnel),
-		openTunnel:         openTunnel,
+		tunnelTopics:       make(map[string]*Tunnel),
+
+		openCh: openCh,
+		ackCh:  ackCh,
 	}
 
 	opts, err := getMQTTOptions(conf)
@@ -57,7 +65,7 @@ func newMQTTConnection(conf Config, openTunnel chan Tunnel) (*mqttConnection, er
 	return &ret, nil
 }
 
-func (con *mqttConnection) Start(ctx context.Context) error {
+func (con *mqttBroker) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-con.mqtt_disconnect_ch:
@@ -70,31 +78,32 @@ func (con *mqttConnection) Start(ctx context.Context) error {
 	}
 }
 
-func (con *mqttConnection) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+func (con *mqttBroker) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
 	zap.S().Debugw("mqtt publish", zap.String("topic", topic))
 
 	return con.client.Publish(topic, qos, retained, payload)
 }
 
-func (con *mqttConnection) connect() error {
+func (con *mqttBroker) connect() error {
 	zap.S().Debugf("connect start")
 	token := con.client.Connect()
 	token.Wait()
 	return token.Error()
 }
 
-func (con *mqttConnection) OpenTunnel(topic string, tunnel Tunnel) error {
+// SubscribeTunnelTopic subscribe topic
+func (con *mqttBroker) SubscribeTunnelTopic(topic string, tunnel *Tunnel) error {
 	con.tunnelTopics[topic] = tunnel
 
 	return con.subscribe()
 }
 
-func (con *mqttConnection) SubscribeControl(topic string) error {
+func (con *mqttBroker) SubscribeControl(topic string) error {
 	con.controlTopic = topic // does not need on in-side
 	return con.subscribe()
 }
 
-func (con *mqttConnection) subscribe() error {
+func (con *mqttBroker) subscribe() error {
 	topics := make(map[string]byte)
 
 	if con.controlTopic != "" {
@@ -115,25 +124,32 @@ func (con *mqttConnection) subscribe() error {
 	return subscribeToken.Error()
 }
 
-func (con *mqttConnection) onMessage(client mqtt.Client, msg mqtt.Message) {
+func (con *mqttBroker) Unsubscribe(topic string) error {
+	if topic == "" {
+		return nil
+	}
+
+	token := con.client.Unsubscribe(topic)
+	if !token.WaitTimeout(subscribeTimeout) {
+		return fmt.Errorf("unsubscribe timeout (%s)", topic)
+	}
+	return token.Error()
+}
+
+func (con *mqttBroker) onMessage(client mqtt.Client, msg mqtt.Message) {
 	zap.S().Debugw("on message", zap.String("topic", msg.Topic()), zap.Int("size", len(msg.Payload())))
 
+	if strings.Contains(msg.Topic(), "ack") {
+		zap.S().Debugw("connection acknoledged")
+		con.ackCh <- msg.Topic()
+		return
+	}
 	if msg.Topic() == con.conf.Control {
 		// This is control message. start a new tunnel
 		// But remote and local should be swapped
-		tun, err := NewTunnelFromMsg(con.conf, msg)
-		if err != nil {
-			zap.S().Error("new tunnel request invalid, %w", err)
-		} else {
-			zap.S().Debugw("tunnel requested",
-				zap.Int("local_port", tun.LocalPort),
-				zap.String("local_topic", tun.LocalTopic),
-				zap.Int("remote_port", tun.RemotePort),
-				zap.String("remote_topic", tun.RemoteTopic),
-			)
-			con.openTunnel <- tun
+		if err := con.recvOpenRequest(msg); err != nil {
+			zap.S().Error(err)
 		}
-
 		return
 	}
 	tun, exists := con.tunnelTopics[msg.Topic()]
@@ -145,18 +161,34 @@ func (con *mqttConnection) onMessage(client mqtt.Client, msg mqtt.Message) {
 	tun.writeCh <- msg.Payload()
 }
 
-func (con *mqttConnection) onConnect(client mqtt.Client) {
+func (con *mqttBroker) recvOpenRequest(msg mqtt.Message) error {
+	tun, err := NewTunnelFromMsg(con.conf, msg, con)
+	if err != nil {
+		return err
+	}
+
+	zap.S().Debug("open request comes")
+	if err := tun.setupRemoteTunnel(tun.ctx); err != nil {
+		zap.S().Error("OpenRemoteTunnel failed, %w", err)
+		return err
+	}
+	go tun.MainLoop(tun.ctx)
+
+	return nil
+}
+
+func (con *mqttBroker) onConnect(client mqtt.Client) {
 	zap.S().Info("connected")
 	if err := con.subscribe(); err != nil {
 		zap.S().Errorw("subscribe failed", zap.Error(err))
 	}
 }
 
-func (con *mqttConnection) onReconnect(client mqtt.Client, opts *mqtt.ClientOptions) {
+func (con *mqttBroker) onReconnect(client mqtt.Client, opts *mqtt.ClientOptions) {
 	zap.S().Info("reconnecting...")
 }
 
-func (con *mqttConnection) onMqttConnectionLost(client mqtt.Client, err error) {
+func (con *mqttBroker) onMqttConnectionLost(client mqtt.Client, err error) {
 	zap.S().Error("MQTT connection lost", zap.Error(err))
 	con.mqtt_disconnect_ch <- true
 }
