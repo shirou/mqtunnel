@@ -157,7 +157,6 @@ func (tun *Tunnel) MainLoop(ctx context.Context) {
 				}
 				return
 			}
-			// publish does not wait
 			zap.S().Debugw("publishCh",
 				zap.String("remote_topic", tun.LocalTopic),
 				zap.Int("size", len(b)))
