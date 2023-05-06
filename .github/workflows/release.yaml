@@ -20,4 +20,4 @@ jobs:
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
         project_path: "./cmd/mqtunnel"
-        extra_files: LICENSE README.md
+        extra_files: LICENSE.txt README.md
