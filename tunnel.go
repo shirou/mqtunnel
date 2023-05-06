@@ -4,95 +4,84 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
-	"strings"
+	"net"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
 )
 
-type TunnelType string
-
-const (
-	TunnelTypeLocal  TunnelType = "local"
-	TunnelTypeRemote TunnelType = "remote"
-)
-
 type Tunnel struct {
-	LocalPort   int    `json:"local_port"`
-	LocalTopic  string `json:"local_topic"`
-	RemotePort  int    `json:"remote_port"`
-	RemoteTopic string `json:"remote_topic"`
+	ID          string
+	LocalPort   int
+	LocalTopic  string
+	RemotePort  int
+	RemoteTopic string
 
-	AckTopic string `json:"ack_topic"`
-
-	tunnelType    TunnelType
-	conf          Config
 	tcpConnection *TCPConnection
 	mqttBroker    *mqttBroker
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	writeCh   chan []byte // writeCh writes a payload from MQTT Broker to local connection
-	publishCh chan []byte // publishCh publish a payload to MQTT Broker
+	writeCh     chan []byte // writeCh writes a payload from MQTT Broker to local connection
+	publishCh   chan []byte // publishCh publish a payload to MQTT Broker
+	tcpClosedCh chan error
 }
 
-func NewTunnel(conf Config, local, remote int) (*Tunnel, error) {
-	// port topic should same level of control topic
-	t := strings.Split(conf.Control, "/")
-	root := strings.Join(t[:len(t)-1], "/")
-
-	ctx, cancel := context.WithCancel(context.Background())
+// NewTunnelFromConnect creates a new Tunnel on local
+func NewTunnelFromConnect(ctx context.Context, mqttBroker *mqttBroker, conn net.Conn, topicRoot string, local, remote int) (*Tunnel, error) {
+	ctx, cancel := context.WithCancel(ctx)
 
 	ret := &Tunnel{
 		ctx:         ctx,
 		cancel:      cancel,
+		ID:          randStr(16),
 		LocalPort:   local,
-		LocalTopic:  fmt.Sprintf("%s/%d-%s", root, local, randStr()),
+		LocalTopic:  fmt.Sprintf("%s/%d-%s", topicRoot, local, randStr(8)),
 		RemotePort:  remote,
-		RemoteTopic: fmt.Sprintf("%s/%d-%s", root, remote, randStr()),
+		RemoteTopic: fmt.Sprintf("%s/%d-%s", topicRoot, remote, randStr(8)),
 
-		AckTopic: fmt.Sprintf("%s/%d-%s", root, remote, randStr()+"-ack"),
-
-		tunnelType: TunnelTypeLocal,
-		conf:       conf,
-		writeCh:    make(chan []byte, bufferSize*10),
-		publishCh:  make(chan []byte, bufferSize*10),
+		writeCh:     make(chan []byte, bufferSize*10),
+		publishCh:   make(chan []byte, bufferSize*10),
+		tcpClosedCh: make(chan error),
+		mqttBroker:  mqttBroker,
 	}
 
-	tcon, err := NewTCPConnection(conf, ret.LocalPort, ret)
+	tcon, err := NewTCPConnection(ret.LocalPort, ret)
 	if err != nil {
 		return nil, fmt.Errorf("new tcp connection error, %w", err)
 	}
+	tcon.conn = conn
 	ret.tcpConnection = tcon
+	go tcon.handleRead(ctx)
 
 	return ret, nil
 }
 
-// NewTunnelFromMsg creates a new Tunnel on remote side from local.
-func NewTunnelFromMsg(conf Config, msg mqtt.Message, mqttBroker *mqttBroker) (*Tunnel, error) {
-	var ret Tunnel
+// NewTunnelFromControl creates a new Tunnel on remote side.
+func NewTunnelFromControl(ctx context.Context, mqttBroker *mqttBroker, ctl ControlPacket) (*Tunnel, error) {
 
-	if err := json.Unmarshal(msg.Payload(), &ret); err != nil {
-		return nil, fmt.Errorf("open request unmarshal error, %w", err)
+	// create a new child context
+	ctx, cancel := context.WithCancel(ctx)
+
+	ret := Tunnel{
+		ID: ctl.TunnelID,
+
+		ctx:    ctx,
+		cancel: cancel,
+
+		// swap local and remote topic
+		LocalPort:   ctl.RemotePort,
+		LocalTopic:  ctl.RemoteTopic,
+		RemotePort:  ctl.LocalPort,
+		RemoteTopic: ctl.LocalTopic,
+
+		writeCh:     make(chan []byte, bufferSize*10),
+		publishCh:   make(chan []byte, bufferSize*10),
+		tcpClosedCh: make(chan error),
+		mqttBroker:  mqttBroker,
 	}
 
-	ret.conf = conf // set from remote mqtunnel conf
-	ret.tunnelType = TunnelTypeRemote
-	// swap local and remote
-	ret.LocalPort, ret.RemotePort = ret.RemotePort, ret.LocalPort
-	ret.LocalTopic, ret.RemoteTopic = ret.RemoteTopic, ret.LocalTopic
-	ret.writeCh = make(chan []byte, bufferSize*10)
-	ret.publishCh = make(chan []byte, bufferSize*10)
-	ret.mqttBroker = mqttBroker
-
-	// create a new context
-	ctx, cancel := context.WithCancel(context.Background())
-	ret.ctx = ctx
-	ret.cancel = cancel
-
-	tcon, err := NewTCPConnection(conf, ret.LocalPort, &ret)
+	tcon, err := NewTCPConnection(ret.LocalPort, &ret)
 	if err != nil {
 		return nil, fmt.Errorf("new tcp connection error, %w", err)
 	}
@@ -103,31 +92,25 @@ func NewTunnelFromMsg(conf Config, msg mqtt.Message, mqttBroker *mqttBroker) (*T
 
 // setupLocalTunnel opens
 func (tun *Tunnel) setupLocalTunnel(ctx context.Context) error {
-	// local side subcscribe ack topic to wait connect ack.
-	if err := tun.mqttBroker.SubscribeControl(tun.AckTopic); err != nil {
-		return fmt.Errorf("failed to control subscribe, %w", err)
-	}
-
 	if err := tun.mqttBroker.SubscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
 		return fmt.Errorf("broker open error, %w", err)
 	}
-
-	go tun.tcpConnection.StartListening(ctx)
-
 	return nil
 }
 
 // setupRemoteTunnel opens on remote
 func (tun *Tunnel) setupRemoteTunnel(ctx context.Context) error {
-	if _, err := tun.tcpConnection.Connect(ctx); err != nil {
-		return fmt.Errorf("tcp connection error, %w", err)
-	}
-
 	if err := tun.mqttBroker.SubscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
 		return fmt.Errorf("broker open error, %w", err)
 	}
 
-	token := tun.mqttBroker.Publish(ctx, tun.AckTopic, 1, false, "ack")
+	if _, err := tun.tcpConnection.connect(ctx); err != nil {
+		return fmt.Errorf("tcp connection error, %w", err)
+	}
+
+	ack, _ := json.Marshal(tun.createAck())
+
+	token := tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 1, false, ack)
 	token.Wait()
 
 	return token.Error()
@@ -135,8 +118,10 @@ func (tun *Tunnel) setupRemoteTunnel(ctx context.Context) error {
 
 // OpenRequest sends a control packet to remote side
 func (tun *Tunnel) OpenRequest(ctx context.Context) error {
-	buf, _ := json.Marshal(tun)
-	token := tun.mqttBroker.Publish(ctx, tun.conf.Control, 1, false, buf)
+
+	ctl := tun.createConnectRequest()
+	buf, _ := json.Marshal(ctl)
+	token := tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 1, false, buf)
 	token.Wait()
 	if err := token.Error(); err != nil {
 		return fmt.Errorf("publish control msg error, %w", err)
@@ -148,7 +133,7 @@ func (tun *Tunnel) OpenRequest(ctx context.Context) error {
 func (tun *Tunnel) MainLoop(ctx context.Context) {
 	defer tun.mqttBroker.Unsubscribe(tun.RemoteTopic)
 
-	zap.S().Infow("start MainLoop")
+	zap.S().Infow("start MainLoop", zap.String("ID", tun.ID))
 	for {
 		select {
 		case b := <-tun.writeCh:
@@ -159,7 +144,19 @@ func (tun *Tunnel) MainLoop(ctx context.Context) {
 			if err != nil {
 				zap.S().Error(err)
 			}
-		case b := <-tun.publishCh:
+		case b, ok := <-tun.publishCh:
+			if !ok {
+				c := tun.createConnectionClosed()
+				zap.S().Debugw("connection closed",
+					zap.String("remote_topic", tun.LocalTopic),
+					zap.Int("size", len(b)))
+				tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 0, false, c)
+				if len(b) > 0 {
+					// send last bytes
+					tun.mqttBroker.Publish(ctx, tun.LocalTopic, 0, false, b)
+				}
+				return
+			}
 			// publish does not wait
 			zap.S().Debugw("publishCh",
 				zap.String("remote_topic", tun.LocalTopic),
@@ -171,13 +168,28 @@ func (tun *Tunnel) MainLoop(ctx context.Context) {
 	}
 }
 
-const randomLetters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-func randStr() string {
-	n := 8
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = randomLetters[rand.Intn(len(randomLetters))]
+func (tun *Tunnel) createConnectRequest() ControlPacket {
+	ret := ControlPacket{
+		Type:        ControlTypeConnectRequest,
+		TunnelID:    tun.ID,
+		LocalPort:   tun.LocalPort,
+		LocalTopic:  tun.LocalTopic,
+		RemotePort:  tun.RemotePort,
+		RemoteTopic: tun.RemoteTopic,
 	}
-	return string(b)
+	return ret
+}
+func (tun *Tunnel) createAck() ControlPacket {
+	ret := ControlPacket{
+		Type:     ControlTypeConnectAck,
+		TunnelID: tun.ID,
+	}
+	return ret
+}
+func (tun *Tunnel) createConnectionClosed() ControlPacket {
+	ret := ControlPacket{
+		Type:     ControlTypeConnectionClosed,
+		TunnelID: tun.ID,
+	}
+	return ret
 }

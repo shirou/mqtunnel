@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -19,23 +19,23 @@ type mqttBroker struct {
 	conf               Config
 	mqtt_disconnect_ch chan bool
 	controlTopic       string
-	controlAckTopic    string
-	tunnelTopics       map[string]*Tunnel
+	tunnelTopics       map[string]*Tunnel // topic: tunnel
 
-	openCh chan *Tunnel
-	ackCh  chan string
+	controlCh chan ControlPacket
 }
 
 const subscribeTimeout = 5 * time.Second
+const topicQoS = 0
 
-func NewMQTTBroker(conf Config, openCh chan *Tunnel, ackCh chan string) (*mqttBroker, error) {
+func NewMQTTBroker(conf Config, controlCh chan ControlPacket) (*mqttBroker, error) {
 	ret := mqttBroker{
 		conf:               conf,
 		mqtt_disconnect_ch: make(chan bool),
 		tunnelTopics:       make(map[string]*Tunnel),
 
-		openCh: openCh,
-		ackCh:  ackCh,
+		controlTopic: conf.Control,
+
+		controlCh: controlCh,
 	}
 
 	opts, err := getMQTTOptions(conf)
@@ -65,10 +65,10 @@ func NewMQTTBroker(conf Config, openCh chan *Tunnel, ackCh chan string) (*mqttBr
 	return &ret, nil
 }
 
-func (con *mqttBroker) Start(ctx context.Context) error {
+func (mqb *mqttBroker) Start(ctx context.Context) error {
 	for {
 		select {
-		case <-con.mqtt_disconnect_ch:
+		case <-mqb.mqtt_disconnect_ch:
 			zap.S().Error("mqtt disconnect message. try to reconnect")
 			// do nothing. auto-reconnect should work
 		case <-ctx.Done():
@@ -78,38 +78,33 @@ func (con *mqttBroker) Start(ctx context.Context) error {
 	}
 }
 
-func (con *mqttBroker) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+func (mqb *mqttBroker) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
 	zap.S().Debugw("mqtt publish", zap.String("topic", topic))
 
-	return con.client.Publish(topic, qos, retained, payload)
+	return mqb.client.Publish(topic, qos, retained, payload)
 }
 
-func (con *mqttBroker) connect() error {
+func (mqb *mqttBroker) connect() error {
 	zap.S().Debugf("connect start")
-	token := con.client.Connect()
+	token := mqb.client.Connect()
 	token.Wait()
 	return token.Error()
 }
 
 // SubscribeTunnelTopic subscribe topic
-func (con *mqttBroker) SubscribeTunnelTopic(topic string, tunnel *Tunnel) error {
-	con.tunnelTopics[topic] = tunnel
+func (mqb *mqttBroker) SubscribeTunnelTopic(topic string, tunnel *Tunnel) error {
+	mqb.tunnelTopics[topic] = tunnel
 
-	return con.subscribe()
+	return mqb.subscribe()
 }
 
-func (con *mqttBroker) SubscribeControl(topic string) error {
-	con.controlTopic = topic // does not need on in-side
-	return con.subscribe()
-}
-
-func (con *mqttBroker) subscribe() error {
+func (mqb *mqttBroker) subscribe() error {
 	topics := make(map[string]byte)
 
-	if con.controlTopic != "" {
-		topics[con.controlTopic] = 1
+	if mqb.controlTopic != "" {
+		topics[mqb.controlTopic] = 1
 	}
-	for t, _ := range con.tunnelTopics {
+	for t, _ := range mqb.tunnelTopics {
 		topics[t] = tunnelQoS
 	}
 
@@ -119,40 +114,40 @@ func (con *mqttBroker) subscribe() error {
 
 	zap.S().Infow("topic subscribing", zap.Strings("topic", logTopic(topics)))
 
-	subscribeToken := con.client.SubscribeMultiple(topics, con.onMessage)
+	subscribeToken := mqb.client.SubscribeMultiple(topics, mqb.onMessage)
 	subscribeToken.Wait()
 	return subscribeToken.Error()
 }
 
-func (con *mqttBroker) Unsubscribe(topic string) error {
+func (mqb *mqttBroker) Unsubscribe(topic string) error {
 	if topic == "" {
 		return nil
 	}
 
-	token := con.client.Unsubscribe(topic)
+	zap.S().Debugw("topic unsubscribing", zap.String("topic", topic))
+
+	token := mqb.client.Unsubscribe(topic)
 	if !token.WaitTimeout(subscribeTimeout) {
 		return fmt.Errorf("unsubscribe timeout (%s)", topic)
 	}
-	return token.Error()
+	if token.Error() != nil {
+		return token.Error()
+	}
+	delete(mqb.tunnelTopics, topic)
+
+	return nil
 }
 
-func (con *mqttBroker) onMessage(client mqtt.Client, msg mqtt.Message) {
+func (mqb *mqttBroker) onMessage(client mqtt.Client, msg mqtt.Message) {
 	zap.S().Debugw("on message", zap.String("topic", msg.Topic()), zap.Int("size", len(msg.Payload())))
 
-	if strings.Contains(msg.Topic(), "ack") {
-		zap.S().Debugw("connection acknoledged")
-		con.ackCh <- msg.Topic()
-		return
-	}
-	if msg.Topic() == con.conf.Control {
-		// This is control message. start a new tunnel
-		// But remote and local should be swapped
-		if err := con.recvOpenRequest(msg); err != nil {
+	if msg.Topic() == mqb.conf.Control {
+		if err := mqb.controlPacketReceived(msg); err != nil {
 			zap.S().Error(err)
 		}
 		return
 	}
-	tun, exists := con.tunnelTopics[msg.Topic()]
+	tun, exists := mqb.tunnelTopics[msg.Topic()]
 	if !exists {
 		zap.S().Errorw("requested topic is not exists",
 			zap.String("topic", msg.Topic()))
@@ -161,8 +156,18 @@ func (con *mqttBroker) onMessage(client mqtt.Client, msg mqtt.Message) {
 	tun.writeCh <- msg.Payload()
 }
 
-func (con *mqttBroker) recvOpenRequest(msg mqtt.Message) error {
-	tun, err := NewTunnelFromMsg(con.conf, msg, con)
+func (mqb *mqttBroker) controlPacketReceived(msg mqtt.Message) error {
+	var control ControlPacket
+	if err := json.Unmarshal(msg.Payload(), &control); err != nil {
+		return fmt.Errorf("unmarshal error, %v", err)
+	}
+	mqb.controlCh <- control
+	return nil
+}
+
+/*
+func (mqb *mqttBroker) recvOpenRequest(msg mqtt.Message) error {
+	tun, err := NewTunnelFromControl(msg, conn)
 	if err != nil {
 		return err
 	}
@@ -176,21 +181,22 @@ func (con *mqttBroker) recvOpenRequest(msg mqtt.Message) error {
 
 	return nil
 }
+*/
 
-func (con *mqttBroker) onConnect(client mqtt.Client) {
+func (mqb *mqttBroker) onConnect(client mqtt.Client) {
 	zap.S().Info("connected")
-	if err := con.subscribe(); err != nil {
+	if err := mqb.subscribe(); err != nil {
 		zap.S().Errorw("subscribe failed", zap.Error(err))
 	}
 }
 
-func (con *mqttBroker) onReconnect(client mqtt.Client, opts *mqtt.ClientOptions) {
+func (mqb *mqttBroker) onReconnect(client mqtt.Client, opts *mqtt.ClientOptions) {
 	zap.S().Info("reconnecting...")
 }
 
-func (con *mqttBroker) onMqttConnectionLost(client mqtt.Client, err error) {
+func (mqb *mqttBroker) onMqttConnectionLost(client mqtt.Client, err error) {
 	zap.S().Error("MQTT connection lost", zap.Error(err))
-	con.mqtt_disconnect_ch <- true
+	mqb.mqtt_disconnect_ch <- true
 }
 
 func newTLSConfig(config Config) (*tls.Config, error) {

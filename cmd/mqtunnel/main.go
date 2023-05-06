@@ -58,14 +58,10 @@ func main() {
 
 			local := cCtx.Int("local")
 			remote := cCtx.Int("remote")
-			tun, err := mqtunnel.NewTunnel(conf, local, remote)
-			if err != nil {
-				return err
-			}
 
 			ctx := context.Background()
 
-			return mqt.Start(ctx, tun)
+			return mqt.Start(ctx, local, remote)
 		},
 	}
 
