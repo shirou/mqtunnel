@@ -45,7 +45,7 @@ We can use certs in Config file.
 
 # Important Notice: Security
 
-This tool itself has no security. If encryption is required, use ssh or similar.\
+This tool itself has no security. If encryption is required, use ssh or similar.
 
 Also, please note that although the topics used add random strings, they can be easily sniffed by others who are authorized to read wildcards.
 
