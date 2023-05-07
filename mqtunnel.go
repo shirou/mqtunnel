@@ -48,10 +48,9 @@ func NewMQTunnel(conf Config) (*MQTunnel, error) {
 	return &ret, nil
 }
 
-// Start starts MQTT broker connection, and also start waiting TCP connection if
-// this is a local mqtunnel.
+// Start starts a MQTT tunnel.
 func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error {
-	go mqt.mqttBroker.Start(ctx)
+	go mqt.mqttBroker.start(ctx)
 
 	if localPort != 0 && remotePort != 0 {
 		zap.S().Debugw("this is local side")
@@ -59,7 +58,7 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 		if err != nil {
 			return fmt.Errorf("new TCPListener failed, %w", err)
 		}
-		go listener.StartListening(ctx, mqt.localCh)
+		go listener.startListening(ctx, mqt.localCh)
 		mqt.isLocal = true
 	}
 
@@ -85,14 +84,14 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 					zap.S().Errorw("setupRemoteTunnel failed", zap.Error(err))
 					continue
 				}
-				go tun.MainLoop(ctx)
+				go tun.mainLoop(ctx)
 			case ControlTypeConnectAck:
 				if !mqt.isLocal { // local only
 					continue
 				}
 				tun, exists := mqt.ackWaiting[ctl.TunnelID]
 				if exists {
-					go tun.MainLoop(ctx)
+					go tun.mainLoop(ctx)
 					mqt.mu.Lock()
 					delete(mqt.ackWaiting, ctl.TunnelID)
 					mqt.connected[ctl.TunnelID] = tun
@@ -105,7 +104,8 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 					delete(mqt.connected, ctl.TunnelID)
 				}
 			default:
-				return fmt.Errorf("unknown control type, %s", ctl.Type)
+				zap.S().Errorf("unknown control type, %s", ctl.Type)
+				continue
 			}
 
 		case conn := <-mqt.localCh:
@@ -122,7 +122,7 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 				zap.S().Errorw("setupLocalTunnel failed", zap.Error(err))
 				continue
 			}
-			if err := tun.OpenRequest(ctx); err != nil {
+			if err := tun.openRequest(ctx); err != nil {
 				zap.S().Errorw("OpenRequest failed", zap.Error(err))
 				continue
 			}

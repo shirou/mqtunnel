@@ -18,8 +18,6 @@ type ControlPacket struct {
 	LocalTopic  string `json:"local_topic"`
 	RemotePort  int    `json:"remote_port"`
 	RemoteTopic string `json:"remote_topic"`
-
-	AckTopic string `json:"ack_topic"`
 }
 
 const randomLetters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"

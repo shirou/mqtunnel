@@ -15,11 +15,11 @@ import (
 )
 
 type mqttBroker struct {
-	client             mqtt.Client
-	conf               Config
-	mqtt_disconnect_ch chan bool
-	controlTopic       string
-	tunnelTopics       map[string]*Tunnel // topic: tunnel
+	client           mqtt.Client
+	conf             Config
+	mqttDisconnectCh chan bool
+	controlTopic     string
+	tunnelTopics     map[string]*Tunnel // topic: tunnel
 
 	controlCh chan ControlPacket
 }
@@ -29,9 +29,9 @@ const topicQoS = 0
 
 func NewMQTTBroker(conf Config, controlCh chan ControlPacket) (*mqttBroker, error) {
 	ret := mqttBroker{
-		conf:               conf,
-		mqtt_disconnect_ch: make(chan bool),
-		tunnelTopics:       make(map[string]*Tunnel),
+		conf:             conf,
+		mqttDisconnectCh: make(chan bool),
+		tunnelTopics:     make(map[string]*Tunnel),
 
 		controlTopic: conf.Control,
 
@@ -65,10 +65,10 @@ func NewMQTTBroker(conf Config, controlCh chan ControlPacket) (*mqttBroker, erro
 	return &ret, nil
 }
 
-func (mqb *mqttBroker) Start(ctx context.Context) error {
+func (mqb *mqttBroker) start(ctx context.Context) error {
 	for {
 		select {
-		case <-mqb.mqtt_disconnect_ch:
+		case <-mqb.mqttDisconnectCh:
 			zap.S().Error("mqtt disconnect message. try to reconnect")
 			// do nothing. auto-reconnect should work
 		case <-ctx.Done():
@@ -78,7 +78,7 @@ func (mqb *mqttBroker) Start(ctx context.Context) error {
 	}
 }
 
-func (mqb *mqttBroker) Publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+func (mqb *mqttBroker) publish(ctx context.Context, topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
 	zap.S().Debugw("mqtt publish", zap.String("topic", topic))
 
 	return mqb.client.Publish(topic, qos, retained, payload)
@@ -91,8 +91,8 @@ func (mqb *mqttBroker) connect() error {
 	return token.Error()
 }
 
-// SubscribeTunnelTopic subscribe topic
-func (mqb *mqttBroker) SubscribeTunnelTopic(topic string, tunnel *Tunnel) error {
+// subscribeTunnelTopic subscribe topic
+func (mqb *mqttBroker) subscribeTunnelTopic(topic string, tunnel *Tunnel) error {
 	mqb.tunnelTopics[topic] = tunnel
 
 	return mqb.subscribe()
@@ -119,7 +119,7 @@ func (mqb *mqttBroker) subscribe() error {
 	return subscribeToken.Error()
 }
 
-func (mqb *mqttBroker) Unsubscribe(topic string) error {
+func (mqb *mqttBroker) unsubscribe(topic string) error {
 	if topic == "" {
 		return nil
 	}
@@ -196,7 +196,7 @@ func (mqb *mqttBroker) onReconnect(client mqtt.Client, opts *mqtt.ClientOptions)
 
 func (mqb *mqttBroker) onMqttConnectionLost(client mqtt.Client, err error) {
 	zap.S().Error("MQTT connection lost", zap.Error(err))
-	mqb.mqtt_disconnect_ch <- true
+	mqb.mqttDisconnectCh <- true
 }
 
 func newTLSConfig(config Config) (*tls.Config, error) {

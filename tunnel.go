@@ -29,11 +29,7 @@ type Tunnel struct {
 
 // NewTunnelFromConnect creates a new Tunnel on local
 func NewTunnelFromConnect(ctx context.Context, mqttBroker *mqttBroker, conn net.Conn, topicRoot string, local, remote int) (*Tunnel, error) {
-	ctx, cancel := context.WithCancel(ctx)
-
 	ret := &Tunnel{
-		ctx:         ctx,
-		cancel:      cancel,
 		ID:          randStr(16),
 		LocalPort:   local,
 		LocalTopic:  fmt.Sprintf("%s/%d-%s", topicRoot, local, randStr(8)),
@@ -92,7 +88,7 @@ func NewTunnelFromControl(ctx context.Context, mqttBroker *mqttBroker, ctl Contr
 
 // setupLocalTunnel opens
 func (tun *Tunnel) setupLocalTunnel(ctx context.Context) error {
-	if err := tun.mqttBroker.SubscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
+	if err := tun.mqttBroker.subscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
 		return fmt.Errorf("broker open error, %w", err)
 	}
 	return nil
@@ -100,7 +96,7 @@ func (tun *Tunnel) setupLocalTunnel(ctx context.Context) error {
 
 // setupRemoteTunnel opens on remote
 func (tun *Tunnel) setupRemoteTunnel(ctx context.Context) error {
-	if err := tun.mqttBroker.SubscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
+	if err := tun.mqttBroker.subscribeTunnelTopic(tun.RemoteTopic, tun); err != nil {
 		return fmt.Errorf("broker open error, %w", err)
 	}
 
@@ -110,18 +106,18 @@ func (tun *Tunnel) setupRemoteTunnel(ctx context.Context) error {
 
 	ack, _ := json.Marshal(tun.createAck())
 
-	token := tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 1, false, ack)
+	token := tun.mqttBroker.publish(ctx, tun.mqttBroker.controlTopic, 1, false, ack)
 	token.Wait()
 
 	return token.Error()
 }
 
-// OpenRequest sends a control packet to remote side
-func (tun *Tunnel) OpenRequest(ctx context.Context) error {
+// openRequest sends a control packet to remote side
+func (tun *Tunnel) openRequest(ctx context.Context) error {
 
 	ctl := tun.createConnectRequest()
 	buf, _ := json.Marshal(ctl)
-	token := tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 1, false, buf)
+	token := tun.mqttBroker.publish(ctx, tun.mqttBroker.controlTopic, 1, false, buf)
 	token.Wait()
 	if err := token.Error(); err != nil {
 		return fmt.Errorf("publish control msg error, %w", err)
@@ -130,8 +126,8 @@ func (tun *Tunnel) OpenRequest(ctx context.Context) error {
 	return nil
 }
 
-func (tun *Tunnel) MainLoop(ctx context.Context) {
-	defer tun.mqttBroker.Unsubscribe(tun.RemoteTopic)
+func (tun *Tunnel) mainLoop(ctx context.Context) {
+	defer tun.mqttBroker.unsubscribe(tun.RemoteTopic)
 
 	zap.S().Infow("start MainLoop", zap.String("ID", tun.ID))
 	for {
@@ -150,17 +146,17 @@ func (tun *Tunnel) MainLoop(ctx context.Context) {
 				zap.S().Debugw("connection closed",
 					zap.String("remote_topic", tun.LocalTopic),
 					zap.Int("size", len(b)))
-				tun.mqttBroker.Publish(ctx, tun.mqttBroker.controlTopic, 0, false, c)
+				tun.mqttBroker.publish(ctx, tun.mqttBroker.controlTopic, 0, false, c)
 				if len(b) > 0 {
 					// send last bytes
-					tun.mqttBroker.Publish(ctx, tun.LocalTopic, 0, false, b)
+					tun.mqttBroker.publish(ctx, tun.LocalTopic, 0, false, b)
 				}
 				return
 			}
 			zap.S().Debugw("publishCh",
 				zap.String("remote_topic", tun.LocalTopic),
 				zap.Int("size", len(b)))
-			tun.mqttBroker.Publish(ctx, tun.LocalTopic, 0, false, b)
+			tun.mqttBroker.publish(ctx, tun.LocalTopic, 0, false, b)
 		case <-ctx.Done():
 			return
 		}
