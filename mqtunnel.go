@@ -17,7 +17,7 @@ type MQTunnel struct {
 	conf       Config
 	mqttBroker *mqttBroker
 
-	controlCh chan ControlPacket
+	controlCh chan controlPacket
 	localCh   chan net.Conn
 
 	ackWaiting map[string]*Tunnel
@@ -32,7 +32,7 @@ func NewMQTunnel(conf Config) (*MQTunnel, error) {
 	ret := MQTunnel{
 		conf: conf,
 
-		controlCh: make(chan ControlPacket),
+		controlCh: make(chan controlPacket),
 		localCh:   make(chan net.Conn),
 
 		ackWaiting: make(map[string]*Tunnel),
@@ -71,7 +71,7 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 				zap.Bool("isLocal", mqt.isLocal))
 
 			switch ctl.Type {
-			case ControlTypeConnectRequest:
+			case controlTypeConnectRequest:
 				if mqt.isLocal { // remote only
 					continue
 				}
@@ -85,7 +85,7 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 					continue
 				}
 				go tun.mainLoop(ctx)
-			case ControlTypeConnectAck:
+			case controlTypeConnectAck:
 				if !mqt.isLocal { // local only
 					continue
 				}
@@ -97,7 +97,7 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 					mqt.connected[ctl.TunnelID] = tun
 					mqt.mu.Unlock()
 				}
-			case ControlTypeConnectionClosed:
+			case controlTypeConnectionClosed:
 				tun, exists := mqt.connected[ctl.TunnelID]
 				if exists {
 					tun.cancel()
