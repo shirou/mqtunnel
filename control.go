@@ -2,16 +2,16 @@ package mqtunnel
 
 import "math/rand"
 
-type ControlType string
+type controlType string
 
 const (
-	ControlTypeConnectRequest   ControlType = "connect"
-	ControlTypeConnectAck       ControlType = "connect_ack"
-	ControlTypeConnectionClosed ControlType = "closed"
+	controlTypeConnectRequest   controlType = "connect"
+	controlTypeConnectAck       controlType = "connect_ack"
+	controlTypeConnectionClosed controlType = "closed"
 )
 
-type ControlPacket struct {
-	Type     ControlType `json:"type"`
+type controlPacket struct {
+	Type     controlType `json:"type"`
 	TunnelID string
 
 	LocalPort   int    `json:"local_port"`

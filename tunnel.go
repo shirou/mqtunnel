@@ -54,7 +54,7 @@ func NewTunnelFromConnect(ctx context.Context, mqttBroker *mqttBroker, conn net.
 }
 
 // NewTunnelFromControl creates a new Tunnel on remote side.
-func NewTunnelFromControl(ctx context.Context, mqttBroker *mqttBroker, ctl ControlPacket) (*Tunnel, error) {
+func NewTunnelFromControl(ctx context.Context, mqttBroker *mqttBroker, ctl controlPacket) (*Tunnel, error) {
 
 	// create a new child context
 	ctx, cancel := context.WithCancel(ctx)
@@ -163,9 +163,9 @@ func (tun *Tunnel) mainLoop(ctx context.Context) {
 	}
 }
 
-func (tun *Tunnel) createConnectRequest() ControlPacket {
-	ret := ControlPacket{
-		Type:        ControlTypeConnectRequest,
+func (tun *Tunnel) createConnectRequest() controlPacket {
+	ret := controlPacket{
+		Type:        controlTypeConnectRequest,
 		TunnelID:    tun.ID,
 		LocalPort:   tun.LocalPort,
 		LocalTopic:  tun.LocalTopic,
@@ -174,16 +174,16 @@ func (tun *Tunnel) createConnectRequest() ControlPacket {
 	}
 	return ret
 }
-func (tun *Tunnel) createAck() ControlPacket {
-	ret := ControlPacket{
-		Type:     ControlTypeConnectAck,
+func (tun *Tunnel) createAck() controlPacket {
+	ret := controlPacket{
+		Type:     controlTypeConnectAck,
 		TunnelID: tun.ID,
 	}
 	return ret
 }
-func (tun *Tunnel) createConnectionClosed() ControlPacket {
-	ret := ControlPacket{
-		Type:     ControlTypeConnectionClosed,
+func (tun *Tunnel) createConnectionClosed() controlPacket {
+	ret := controlPacket{
+		Type:     controlTypeConnectionClosed,
 		TunnelID: tun.ID,
 	}
 	return ret

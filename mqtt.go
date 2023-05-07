@@ -21,13 +21,13 @@ type mqttBroker struct {
 	controlTopic     string
 	tunnelTopics     map[string]*Tunnel // topic: tunnel
 
-	controlCh chan ControlPacket
+	controlCh chan controlPacket
 }
 
-const subscribeTimeout = 5 * time.Second
+const mqttCommandsTimeout = 5 * time.Second
 const topicQoS = 0
 
-func NewMQTTBroker(conf Config, controlCh chan ControlPacket) (*mqttBroker, error) {
+func NewMQTTBroker(conf Config, controlCh chan controlPacket) (*mqttBroker, error) {
 	ret := mqttBroker{
 		conf:             conf,
 		mqttDisconnectCh: make(chan bool),
@@ -87,7 +87,9 @@ func (mqb *mqttBroker) publish(ctx context.Context, topic string, qos byte, reta
 func (mqb *mqttBroker) connect() error {
 	zap.S().Debugf("connect start")
 	token := mqb.client.Connect()
-	token.Wait()
+	if c := token.WaitTimeout(mqttCommandsTimeout); !c {
+		return fmt.Errorf("connect timed out")
+	}
 	return token.Error()
 }
 
@@ -115,7 +117,9 @@ func (mqb *mqttBroker) subscribe() error {
 	zap.S().Infow("topic subscribing", zap.Strings("topic", logTopic(topics)))
 
 	subscribeToken := mqb.client.SubscribeMultiple(topics, mqb.onMessage)
-	subscribeToken.Wait()
+	if c := subscribeToken.WaitTimeout(mqttCommandsTimeout); !c {
+		return fmt.Errorf("subscribe timed out")
+	}
 	return subscribeToken.Error()
 }
 
@@ -127,7 +131,7 @@ func (mqb *mqttBroker) unsubscribe(topic string) error {
 	zap.S().Debugw("topic unsubscribing", zap.String("topic", topic))
 
 	token := mqb.client.Unsubscribe(topic)
-	if !token.WaitTimeout(subscribeTimeout) {
+	if !token.WaitTimeout(mqttCommandsTimeout) {
 		return fmt.Errorf("unsubscribe timeout (%s)", topic)
 	}
 	if token.Error() != nil {
@@ -157,31 +161,13 @@ func (mqb *mqttBroker) onMessage(client mqtt.Client, msg mqtt.Message) {
 }
 
 func (mqb *mqttBroker) controlPacketReceived(msg mqtt.Message) error {
-	var control ControlPacket
+	var control controlPacket
 	if err := json.Unmarshal(msg.Payload(), &control); err != nil {
 		return fmt.Errorf("unmarshal error, %v", err)
 	}
 	mqb.controlCh <- control
 	return nil
 }
-
-/*
-func (mqb *mqttBroker) recvOpenRequest(msg mqtt.Message) error {
-	tun, err := NewTunnelFromControl(msg, conn)
-	if err != nil {
-		return err
-	}
-
-	zap.S().Debug("open request comes")
-	if err := tun.setupRemoteTunnel(tun.ctx); err != nil {
-		zap.S().Error("OpenRemoteTunnel failed, %w", err)
-		return err
-	}
-	go tun.MainLoop(tun.ctx)
-
-	return nil
-}
-*/
 
 func (mqb *mqttBroker) onConnect(client mqtt.Client) {
 	zap.S().Info("connected")
