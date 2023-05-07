@@ -9,7 +9,7 @@ Note: This tool is under construction. Please do not use this yet.
 
 # How to use
 
-1. Prepare config file with MQTT broker connection endpoint. The `control` means control topic.
+1. Prepare config file with MQTT broker connection endpoint. `control` means a topic name which is used for sending control packet. The topics used for a tunnel will be created at the same level as this control topic. Therefore, wildcard permission of at least `+` for this level is required.
 
 ```
 {
@@ -23,8 +23,6 @@ Note: This tool is under construction. Please do not use this yet.
     - `-l` : local port
     - `-r` : remote port
 4. Enjoy!
-
-Note: Only one client can be connected at a time to prevent line congestion.
 
 # Config file 
 
@@ -40,8 +38,6 @@ We can use certs in Config file.
     "control": "device/1/control"
 }
 ```
-
-`control` means a topic name which is used for sending control payload. The topics used for a tunnel will be created at the same level as this control topic. Therefore, wildcard permission of at least `+` for this level is required.
 
 # Important Notice: Security
 
@@ -92,5 +88,3 @@ RemoteTCP ->> Remote: connect()
 # License
 
 - Apache License
-
-

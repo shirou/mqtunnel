@@ -12,22 +12,27 @@ import (
 type TCPListener struct {
 	conf Config
 	port int
+
+	closeCh chan error
 }
 
 func NewTCPListener(conf Config, port int) (*TCPListener, error) {
 	ret := TCPListener{
-		conf: conf,
-		port: port,
+		conf:    conf,
+		port:    port,
+		closeCh: make(chan error),
 	}
 
 	return &ret, nil
 }
 
-func (tcl *TCPListener) StartListening(ctx context.Context, localCh chan net.Conn) error {
+func (tcl *TCPListener) startListening(ctx context.Context, localCh chan net.Conn) error {
 	go tcl.listen(ctx, localCh)
 
 	for {
 		select {
+		case err := <-tcl.closeCh:
+			return err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -35,18 +40,19 @@ func (tcl *TCPListener) StartListening(ctx context.Context, localCh chan net.Con
 }
 
 func (tcl *TCPListener) listen(ctx context.Context, localCh chan net.Conn) error {
-	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", tcl.port))
+	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%d", tcl.port))
 	if err != nil {
 		zap.S().Errorw("ResolveTCPAddr error", zap.Error(err))
 		return fmt.Errorf("ResolveTCPAddr error, %w", err)
 	}
 
-	listener, err := net.ListenTCP("tcp4", addr)
+	listener, err := net.ListenTCP("tcp", addr)
 	if err != nil {
 		zap.S().Errorw("listen error", zap.Error(err))
 		return fmt.Errorf("listen error, %w", err)
 	}
 	defer listener.Close()
+
 	zap.S().Infow("start listening", zap.Int("port", tcl.port))
 
 	for {
@@ -55,6 +61,7 @@ func (tcl *TCPListener) listen(ctx context.Context, localCh chan net.Conn) error
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				continue
 			} else {
+				tcl.closeCh <- err
 				return fmt.Errorf("accept error, %w", err)
 			}
 		}
@@ -62,21 +69,10 @@ func (tcl *TCPListener) listen(ctx context.Context, localCh chan net.Conn) error
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(time.Second * 60)
 
-		zap.S().Debugw("accepted", zap.Int("local_port", tcl.port), zap.String("app", conn.RemoteAddr().String()))
+		zap.S().Debugw("accepted",
+			zap.Int("local_port", tcl.port),
+			zap.String("app_port", conn.RemoteAddr().String()))
+
 		localCh <- conn
-
-		/*
-			con.conn = conn
-
-			// send open request to remote side
-			if err := con.tunnel.OpenRequest(ctx); err != nil {
-				return fmt.Errorf("openRequest failed, %w", err)
-			}
-
-			// Block other connections to prevent line congestion.
-			if err := con.handleRead(ctx, conn); err != nil {
-				return err
-			}
-		*/
 	}
 }

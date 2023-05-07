@@ -60,7 +60,7 @@ func (con *TCPConnection) connect(ctx context.Context) (net.Conn, error) {
 
 // handleWrite writes to conn
 func (con *TCPConnection) handleWrite(ctx context.Context, b []byte) (int, error) {
-	zap.S().Debugw("tcp write", zap.Int("port", con.port), zap.Int("size", len(b)))
+	zap.S().Debugw("handleWrite", zap.Int("port", con.port), zap.Int("size", len(b)))
 
 	if con.conn == nil {
 		return 0, fmt.Errorf("write but not connected yet")
