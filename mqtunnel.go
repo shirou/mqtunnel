@@ -69,45 +69,9 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 				zap.String("type", string(ctl.Type)),
 				zap.String("ID", ctl.TunnelID),
 				zap.Bool("isLocal", mqt.isLocal))
-
-			switch ctl.Type {
-			case controlTypeConnectRequest:
-				if mqt.isLocal { // remote only
-					continue
-				}
-				tun, err := NewTunnelFromControl(ctx, mqt.mqttBroker, ctl)
-				if err != nil {
-					zap.S().Errorw("NewTunnelFromControl failed", zap.Error(err))
-					continue
-				}
-				if err := tun.setupRemoteTunnel(ctx); err != nil {
-					zap.S().Errorw("setupRemoteTunnel failed", zap.Error(err))
-					continue
-				}
-				go tun.mainLoop(ctx)
-			case controlTypeConnectAck:
-				if !mqt.isLocal { // local only
-					continue
-				}
-				tun, exists := mqt.ackWaiting[ctl.TunnelID]
-				if exists {
-					go tun.mainLoop(ctx)
-					mqt.mu.Lock()
-					delete(mqt.ackWaiting, ctl.TunnelID)
-					mqt.connected[ctl.TunnelID] = tun
-					mqt.mu.Unlock()
-				}
-			case controlTypeConnectionClosed:
-				tun, exists := mqt.connected[ctl.TunnelID]
-				if exists {
-					tun.cancel()
-					delete(mqt.connected, ctl.TunnelID)
-				}
-			default:
-				zap.S().Errorf("unknown control type, %s", ctl.Type)
-				continue
+			if err := mqt.handleControl(ctx, ctl); err != nil {
+				zap.S().Errorw("handleControl failed", zap.Error(err))
 			}
-
 		case conn := <-mqt.localCh:
 			// topics should be same level as control topic
 			t := strings.Split(mqt.conf.Control, "/")
@@ -133,4 +97,43 @@ func (mqt *MQTunnel) Start(ctx context.Context, localPort, remotePort int) error
 			return ctx.Err()
 		}
 	}
+}
+
+func (mqt *MQTunnel) handleControl(ctx context.Context, ctl controlPacket) error {
+
+	switch ctl.Type {
+	case controlTypeConnectRequest:
+		if mqt.isLocal { // remote only
+			return nil
+		}
+		tun, err := NewTunnelFromControl(ctx, mqt.mqttBroker, ctl)
+		if err != nil {
+			return fmt.Errorf("NewTunnelFromControl failed, %w", err)
+		}
+		if err := tun.setupRemoteTunnel(ctx); err != nil {
+			return fmt.Errorf("setupRemoteTunnel failed, %w", err)
+		}
+		go tun.mainLoop(ctx)
+	case controlTypeConnectAck:
+		if !mqt.isLocal { // local only
+			return nil
+		}
+		tun, exists := mqt.ackWaiting[ctl.TunnelID]
+		if exists {
+			go tun.mainLoop(ctx)
+			mqt.mu.Lock()
+			delete(mqt.ackWaiting, ctl.TunnelID)
+			mqt.connected[ctl.TunnelID] = tun
+			mqt.mu.Unlock()
+		}
+	case controlTypeConnectionClosed:
+		tun, exists := mqt.connected[ctl.TunnelID]
+		if exists {
+			tun.cancel()
+			delete(mqt.connected, ctl.TunnelID)
+		}
+	default:
+		return fmt.Errorf("unknown control type, %s", ctl.Type)
+	}
+	return nil
 }
