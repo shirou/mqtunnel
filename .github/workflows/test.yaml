@@ -1,0 +1,26 @@
+name: Go package
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          cache-dependency-path: go.sum
+          go-version-file: go.mod
+      - name: Start Mosquitto
+        uses: namoshek/mosquitto-github-action@v1
+        with:
+          version: '1.6'
+          ports: '1883:1883 8883:8883'
+          config: ${{ github.workspace }}/.ci/mosquitto-no-auth.conf
+
+      - name: Build
+        run: go build -C cmd/mqtunnel -o ../../mqtunnel
+
+      - name: Test
+        run: go test -v ./...
