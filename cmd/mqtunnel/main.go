@@ -28,16 +28,19 @@ func main() {
 				Value:   false,
 				Usage:   "verbose",
 			},
+			&cli.StringFlag{
+				Name:    "control",
+				Aliases: []string{"C"},
+				Usage:   "overwrite control topic",
+			},
 			&cli.IntFlag{
 				Name:    "local",
 				Aliases: []string{"l"},
-				Value:   0,
 				Usage:   "local port",
 			},
 			&cli.IntFlag{
 				Name:    "remote",
 				Aliases: []string{"r"},
-				Value:   0,
 				Usage:   "remote port",
 			},
 		},
@@ -51,6 +54,12 @@ func main() {
 			if err != nil {
 				return err
 			}
+			// overwrite control topic if the flag is specified.
+			control := cCtx.String("control")
+			if control != "" {
+				conf.Control = control
+			}
+
 			mqt, err := mqtunnel.NewMQTunnel(conf)
 			if err != nil {
 				return err
