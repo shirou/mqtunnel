@@ -22,6 +22,7 @@ Note: This tool is under construction. Please do not use this yet.
 3. Run on local host `mqtunnel -c config.json -l 2022 -r 22` with same config.json.
     - `-l` : local port
     - `-r` : remote port
+    - (optional) `-C`: overwrite control topic 
 4. Enjoy!
 
 # Config file 
@@ -38,6 +39,12 @@ We can use certs in Config file.
     "control": "device/1/control"
 }
 ```
+
+Other options
+
+- `clientId`: MQTT ClientID. If empty, random string is generated
+- `username`: MQTT broker username
+- `password`: MQTT broker password
 
 # Important Notice: Security
 

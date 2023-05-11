@@ -211,9 +211,12 @@ func newTLSConfig(config Config) (*tls.Config, error) {
 }
 
 func getMQTTOptions(conf Config) (*mqtt.ClientOptions, error) {
-	u, err := uuid.NewRandom()
-	if err != nil {
-		return nil, fmt.Errorf("failed to make uuid, %w", err)
+	if conf.ClientID == "" {
+		u, err := uuid.NewRandom()
+		if err != nil {
+			return nil, fmt.Errorf("failed to make uuid, %w", err)
+		}
+		conf.ClientID = u.String()
 	}
 
 	opts := mqtt.NewClientOptions()
@@ -228,7 +231,7 @@ func getMQTTOptions(conf Config) (*mqtt.ClientOptions, error) {
 		}
 		opts.SetTLSConfig(tlsConfig)
 	}
-	opts.SetClientID(u.String())
+	opts.SetClientID(conf.ClientID)
 	opts.SetCleanSession(true)
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetryInterval(20 * time.Second)
